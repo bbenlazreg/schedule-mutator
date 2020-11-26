@@ -1,0 +1,73 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: schedulemutator
+  labels:
+    app: schedulemutator
+spec:
+  publishNotReadyAddresses: true
+  ports:
+    - port: 443
+      targetPort: 8443
+  selector:
+    app: schedulemutator
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: schedulemutator
+  labels:
+    app: schedulemutator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: schedulemutator
+  template:
+    metadata:
+      name: schedulemutator
+      labels:
+        app: schedulemutator
+    spec:
+      containers:
+        - name: schedulemutator
+          image: eu.gcr.io/gl-dsi-ecom-darkchain-fl/ggl-k8s-schedulemutator-webhook
+          imagePullPolicy: Always
+          resources:
+            limits:
+              cpu: 500m
+              memory: 128Mi
+            requests:
+              cpu: 250m
+              memory: 64Mi
+
+---
+apiVersion: admissionregistration.k8s.io/v1beta1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: schedulemutator
+  labels:
+    app: schedulemutator
+webhooks:
+  - name: schedulemutator.default.svc.cluster.local
+    clientConfig:
+      caBundle: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURERENDQWZTZ0F3SUJBZ0lSQUpCOVlmcFVEaDc4Wk0xU1RmWVVqYzh3RFFZSktvWklodmNOQVFFTEJRQXcKTHpFdE1Dc0dBMVVFQXhNa1lUQTRaRGd5T1dRdE5qY3dOQzAwTW1SaExUZzROV0V0WlRNMFpEUXlNMlppTWpObQpNQjRYRFRJd01EWXlPVEEzTXpFeU4xb1hEVEkxTURZeU9EQTRNekV5TjFvd0x6RXRNQ3NHQTFVRUF4TWtZVEE0ClpEZ3lPV1F0Tmpjd05DMDBNbVJoTFRnNE5XRXRaVE0wWkRReU0yWmlNak5tTUlJQklqQU5CZ2txaGtpRzl3MEIKQVFFRkFBT0NBUThBTUlJQkNnS0NBUUVBcDNtdnM1NTZ6c1RTaHlVK2s5OEtLRFJUcVdZak1pN21sSFJRbXRKYQpTeDhJN001Wkc5cGIzZWR0Y0RqOHZiRExuYWt2bVJ1Rmh4WVQyQ2ZiWWZXYi9GM2lkQXJFTXp2SThYWWZFUlV0Cnk2UGttcGZqRWtFdC9waCtTNHFXclRrMFY2dDdGNFFYclV2TnRqSlo3a2ZaNVRyZmswY1JPMFNLK25zb1k5QnEKOFV0Z3NWWXNTRlZQNFQ3VHRuU2doemNCN2gvd2c0L2J1cVRhWS9VdkI1N1JwdHpiSmFud0tEaGR4a0FKSzZYaQo5UXdnQ2RvRWVVK2JGZ2x2U1hseHd4NFBJNmlYRlpKSGtaalpsQ05YdDZ2cE1YMDZaSGlOcE9xVndBYWxFYlNKCjJxeEFUcG5GSVRaeTZJd2tnUTNFZlhyVlN0S2EwR21uZHZoWUhFRGo5Y2RZSHdJREFRQUJveU13SVRBT0JnTlYKSFE4QkFmOEVCQU1DQWdRd0R3WURWUjBUQVFIL0JBVXdBd0VCL3pBTkJna3Foa2lHOXcwQkFRc0ZBQU9DQVFFQQpRQUhpSXh1OXRPR2pDcUFKNlFKajA2TkdlTVFTK3FRSjc2cG0vOFl2dU9rQStIc2UzZHJKRXhaeDBSdVR3YXYwCmVXK3k5cDRaaE5lcFMyQ05GQnhIQ002NHNySGtLMy9KUjR6NmZTc05XU29GeE40UmhtenRWN3ArSmNiSlZXWk4KaU94a3FueVdxUE5CVmlCQXVjQ202RC9wa0hINGZZZUNuSWxGem5vQUU0VlVzYTNncm1LaDVZSnBLQ2J0bTRabgpNRm53M0JvYW1OTFhuRVVBd1FTL0VBY29oTDZiN3RaVnRDajNGWVZreEJQUEZPVWJFcWZmVjJwREtFM0d0c0orCktjc0I2UDJING5ZZHZmRkNyc3NIZkdFbVI1ejJZS3JjTzA0dWQvVTMvOXYvYWQ4YUZiU1JXOVBodFJ0YkN1S3gKN0NYY0pyRG56QnpPT1pzUzFybEUrdz09Ci0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0K
+      service:
+        name: schedulemutator
+        namespace: default
+        path: "/mutate"
+        port: 443
+    rules:
+      - operations: ["CREATE"]
+        apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["pods"]
+    sideEffects: None
+    timeoutSeconds: 5
+    reinvocationPolicy: Never
+    failurePolicy: Ignore
+    namespaceSelector:
+      matchLabels:
+        schedulemutator: enabled

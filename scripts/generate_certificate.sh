@@ -1,0 +1,172 @@
+#!/usr/bin/env sh
+
+set -e
+
+usage() {
+  cat <<EOF
+Generate certificate suitable for use with any Kubernetes Mutating Webhook.
+This script uses k8s' CertificateSigningRequest API to a generate a
+certificate signed by k8s CA suitable for use with any Kubernetes Mutating Webhook service pod.
+This requires permissions to create and approve CSR. See
+https://kubernetes.io/docs/tasks/tls/managing-tls-in-a-cluster for
+detailed explantion and additional instructions.
+The server key/cert k8s CA cert are stored in a k8s secret.
+usage: ${0} [OPTIONS]
+The following flags are required.
+    --service          Service name of webhook.
+    --webhook          Webhook config name.
+    --namespace        Namespace where webhook service and secret reside.
+    --secret           Secret name for CA certificate and server certificate/key pair.
+The following flags are optional.
+    --webhook-kind     Webhook kind, either MutatingWebhookConfiguration or
+                       ValidatingWebhookConfiguration (defaults to MutatingWebhookConfiguration)
+EOF
+  exit 1
+}
+
+eval ${CLUSTER_CONNECTION}
+
+while [ $# -gt 0 ]; do
+  case ${1} in
+      --service)
+          service="$2"
+          shift
+          ;;
+      --webhook)
+          webhook="$2"
+          shift
+          ;;
+      --secret)
+          secret="$2"
+          shift
+          ;;
+      --namespace)
+          namespace="$2"
+          shift
+          ;;
+      --webhook-kind)
+          kind="$2"
+          shift
+          ;;
+      *)
+          usage
+          ;;
+  esac
+  shift
+done
+
+[ -z "${service}" ] && echo "ERROR: --service flag is required" && exit 1
+[ -z "${webhook}" ] && echo "ERROR: --webhook flag is required" && exit 1
+[ -z "${secret}" ] && echo "ERROR: --secret flag is required" && exit 1
+[ -z "${namespace}" ] && echo "ERROR: --namespace flag is required" && exit 1
+
+fullServiceDomain="${service}.${namespace}.svc"
+
+if [ ${#fullServiceDomain} -gt 64 ] ; then
+  echo "ERROR: common name exceeds the 64 character limit: ${fullServiceDomain}"
+  exit 1
+fi
+
+if [ ! -x "$(command -v openssl)" ]; then
+  echo "ERROR: openssl not found"
+  exit 1
+fi
+
+csrName=${service}.${namespace}
+tmpdir=$(mktemp -d)
+echo "creating certs in tmpdir ${tmpdir} "
+
+cat <<EOF >> "${tmpdir}/csr.conf"
+[req]
+req_extensions = v3_req
+distinguished_name = req_distinguished_name
+[req_distinguished_name]
+[ v3_req ]
+basicConstraints = CA:FALSE
+keyUsage = nonRepudiation, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = @alt_names
+[alt_names]
+DNS.1 = ${service}
+DNS.2 = ${service}.${namespace}
+DNS.3 = ${fullServiceDomain}
+EOF
+
+openssl genrsa -out "${tmpdir}/server-key.pem" 2048
+openssl req -new -key "${tmpdir}/server-key.pem" -subj "/CN=${fullServiceDomain}" -out "${tmpdir}/server.csr" -config "${tmpdir}/csr.conf"
+
+set +e
+# clean-up any previously created CSR for our service. Ignore errors if not present.
+if kubectl delete csr "${csrName}"; then
+    echo "WARN: Previous CSR was found and removed."
+fi
+set -e
+
+# create server cert/key CSR and send it to k8s api
+cat <<EOF | kubectl create -f -
+apiVersion: certificates.k8s.io/v1beta1
+kind: CertificateSigningRequest
+metadata:
+  name: ${csrName}
+spec:
+  groups:
+  - system:authenticated
+  request: $(base64 < "${tmpdir}/server.csr" | tr -d '\n')
+  usages:
+  - digital signature
+  - key encipherment
+  - server auth
+EOF
+
+set +e
+# verify CSR has been created
+while true; do
+  if kubectl get csr "${csrName}"; then
+      break
+  fi
+done
+set -e
+
+# approve and fetch the signed certificate
+kubectl certificate approve "${csrName}"
+
+set +e
+# verify certificate has been signed
+i=1
+while [ "$i" -ne 10 ]
+do
+  serverCert=$(kubectl get csr "${csrName}" -o jsonpath='{.status.certificate}')
+  if [ "${serverCert}" != '' ]; then
+      break
+  fi
+  sleep 5
+  i=$((i + 1))
+done
+
+set -e
+if [ "${serverCert}" = '' ]; then
+  echo "ERROR: After approving csr ${csrName}, the signed certificate did not appear on the resource. Giving up after 10 attempts." >&2
+  exit 1
+fi
+
+echo "${serverCert}" | openssl base64 -d -A -out "${tmpdir}/server-cert.pem"
+
+# create the secret with CA cert and server cert/key
+kubectl create secret tls "${secret}" \
+      --key="${tmpdir}/server-key.pem" \
+      --cert="${tmpdir}/server-cert.pem" \
+      --dry-run -o yaml |
+  kubectl -n "${namespace}" apply -f -
+
+caBundle=$(kubectl config view --raw --minify --flatten -o jsonpath='{.clusters[].cluster.certificate-authority-data}')
+
+set +e
+# Patch the webhook adding the caBundle
+while true; do
+  echo "INFO: Trying to patch webhook adding the caBundle."
+  if kubectl patch "${kind:-mutatingwebhookconfiguration}" "${webhook}" --type='json' -p "[{'op': 'add', 'path': '/webhooks/0/clientConfig/caBundle', 'value':'${caBundle}'}]"; then
+      break
+  fi
+  echo "INFO: webhook not patched. Retrying in 5s..."
+  sleep 5
+done
